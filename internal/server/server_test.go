@@ -19,6 +19,7 @@ type env struct {
 	srv  *httptest.Server
 	sess string
 	dir  string
+	key  string // sent as the Bearer token when set
 }
 
 // fakeRole registers a session named name (pid) and answers every frame with reply(body).
@@ -56,7 +57,9 @@ func (e *env) fakeRole(t *testing.T, name string, pid int, reply func(string) st
 	}()
 }
 
-func newEnv(t *testing.T, timeout time.Duration) *env {
+func newEnv(t *testing.T, timeout time.Duration) *env { return newEnvKey(t, timeout, "") }
+
+func newEnvKey(t *testing.T, timeout time.Duration, key string) *env {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "oc")
 	if err != nil {
@@ -73,12 +76,29 @@ func newEnv(t *testing.T, timeout time.Duration) *env {
 	t.Cleanup(func() { l.Close() })
 	b := NewBridge(own, "opencc", peer.Prompting, timeout)
 	go b.Serve(l)
-	e := &env{httptest.NewServer(New(sess, "/proc", b).Handler()), sess, dir}
+	api := New(sess, "/proc", b)
+	api.Key = key
+	e := &env{httptest.NewServer(api.Handler()), sess, dir, key}
 	t.Cleanup(e.srv.Close)
 	return e
 }
 
-func (e *env) post(t *testing.T, path, key, body string) (int, http.Header, []byte) {
+// post sends body with "model" set to role when the body has none. The env key, if any, is the Bearer token.
+func (e *env) post(t *testing.T, path, role, body string) (int, http.Header, []byte) {
+	t.Helper()
+	var m map[string]any
+	if json.Unmarshal([]byte(body), &m) == nil && role != "" {
+		if _, has := m["model"]; !has {
+			m["model"] = role
+		}
+		nb, _ := json.Marshal(m)
+		body = string(nb)
+	}
+	return e.raw(t, path, e.key, body)
+}
+
+// raw sends body as is with the given Bearer token (empty: no header).
+func (e *env) raw(t *testing.T, path, key, body string) (int, http.Header, []byte) {
 	t.Helper()
 	req, _ := http.NewRequest("POST", e.srv.URL+path, strings.NewReader(body))
 	if key != "" {
@@ -93,7 +113,7 @@ func (e *env) post(t *testing.T, path, key, body string) (int, http.Header, []by
 	return r.StatusCode, r.Header, b
 }
 
-const chatBody = `{"model":"gpt-4o","temperature":0.2,"messages":[{"role":"system","content":"be brief"},{"role":"user","content":"hi"}]}`
+const chatBody = `{"temperature":0.2,"messages":[{"role":"system","content":"be brief"},{"role":"user","content":"hi"}]}`
 
 func errCode(t *testing.T, b []byte) string {
 	t.Helper()
@@ -123,7 +143,7 @@ func TestChatOK(t *testing.T) {
 	if err := json.Unmarshal(b, &r); err != nil || len(r.Choices) != 1 {
 		t.Fatalf("bad body %s", b)
 	}
-	if r.Object != "chat.completion" || r.Model != "gpt-4o" || r.Choices[0].Message.Content != "hello there" || r.Choices[0].FinishReason != "stop" {
+	if r.Object != "chat.completion" || r.Model != "reviewer" || r.Choices[0].Message.Content != "hello there" || r.Choices[0].FinishReason != "stop" {
 		t.Fatalf("bad body %s", b)
 	}
 	if h.Get("X-Opencc-Ignored") != "temperature" {
@@ -134,18 +154,47 @@ func TestChatOK(t *testing.T) {
 	}
 }
 
-func TestAuthErrors(t *testing.T) {
+func TestModelRouting(t *testing.T) {
 	e := newEnv(t, 2*time.Second)
 	e.fakeRole(t, "reviewer", os.Getpid(), func(string) string { return "x" })
 	for _, c := range []struct {
-		key  string
-		st   int
-		code string
-	}{{"", 401, "invalid_api_key"}, {"nobody", 404, "model_not_found"}, {"<x>", 400, "invalid_request"}} {
-		st, _, b := e.post(t, "/v1/chat/completions", c.key, chatBody)
-		if st != c.st || errCode(t, b) != c.code {
+		model string
+		st    int
+		code  string
+	}{{"", 400, "invalid_request"}, {"gpt-4o", 404, "model_not_found"}, {"<x>", 400, "invalid_request"}, {"reviewer", 200, ""}} {
+		body := `{"messages":[{"role":"user","content":"a"}]`
+		if c.model != "" {
+			body += `,"model":"` + c.model + `"`
+		}
+		st, _, b := e.post(t, "/v1/chat/completions", "", body+"}")
+		if st != c.st || (c.code != "" && errCode(t, b) != c.code) {
+			t.Errorf("model %q: %d %s", c.model, st, b)
+		}
+		if c.model == "gpt-4o" && !strings.Contains(string(b), "live sessions: reviewer") {
+			t.Errorf("404 does not list live sessions: %s", b)
+		}
+	}
+	// no key set: any Authorization header, or none, is fine
+	if st, _, b := e.raw(t, "/v1/chat/completions", "whatever", `{"model":"reviewer","messages":[{"role":"user","content":"a"}]}`); st != 200 {
+		t.Errorf("junk key without a configured key: %d %s", st, b)
+	}
+}
+
+func TestAPIKeyWhenConfigured(t *testing.T) {
+	e := newEnvKey(t, 2*time.Second, "s3cret")
+	e.fakeRole(t, "reviewer", os.Getpid(), func(string) string { return "x" })
+	body := `{"model":"reviewer","messages":[{"role":"user","content":"a"}]}`
+	for _, c := range []struct {
+		key string
+		st  int
+	}{{"", 401}, {"wrong", 401}, {"s3cret", 200}} {
+		if st, _, b := e.raw(t, "/v1/chat/completions", c.key, body); st != c.st {
 			t.Errorf("key %q: %d %s", c.key, st, b)
 		}
+	}
+	// every route is behind the key, not only chat
+	if st, _, _ := e.do(t, "GET", "/v1/models", ""); st != 401 {
+		t.Errorf("models without key: %d", st)
 	}
 }
 
@@ -257,7 +306,7 @@ func TestResponses(t *testing.T) {
 	e := newEnv(t, 2*time.Second)
 	var got string
 	e.fakeRole(t, "r", os.Getpid(), func(b string) string { got = b; return "resp text" })
-	st, _, b := e.post(t, "/v1/responses", "r", `{"model":"m","instructions":"terse","input":[{"role":"user","content":[{"type":"input_text","text":"yo"}]}]}`)
+	st, _, b := e.post(t, "/v1/responses", "r", `{"instructions":"terse","input":[{"role":"user","content":[{"type":"input_text","text":"yo"}]}]}`)
 	if st != 200 || !strings.Contains(string(b), `"object":"response"`) || !strings.Contains(string(b), `"text":"resp text"`) ||
 		!strings.Contains(got, "system: terse") || !strings.Contains(got, "user: yo") {
 		t.Fatalf("%d %s\n%s", st, b, got)

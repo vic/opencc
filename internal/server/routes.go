@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -51,6 +52,10 @@ func (s *Server) outer(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		if !s.authorized(r) {
+			fail(w, apierr.New(apierr.NoAuth, "", "send the API key as Authorization: Bearer <key>"))
+			return
+		}
 		if !strings.HasPrefix(r.URL.Path, "/v1/") && r.URL.Path != "/v1" {
 			r2 := r.Clone(r.Context())
 			r2.URL.Path = "/v1" + r.URL.Path
@@ -62,4 +67,13 @@ func (s *Server) outer(next http.Handler) http.Handler {
 
 func (s *Server) deleteModel(w http.ResponseWriter, _ *http.Request) {
 	fail(w, apierr.New(apierr.NotImplemented, "", "a session name is not a fine-tuned model: nothing to delete"))
+}
+
+// authorized: with no Key set every request passes. With a Key set the request must carry it as a Bearer token.
+func (s *Server) authorized(r *http.Request) bool {
+	if s.Key == "" {
+		return true
+	}
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return ok && subtle.ConstantTimeCompare([]byte(got), []byte(s.Key)) == 1
 }

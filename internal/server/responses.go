@@ -136,11 +136,6 @@ func chatMessages(r respRequest) ([]openai.Message, *apierr.Error) {
 }
 
 func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
-	sess, e := s.session(r)
-	if e != nil {
-		fail(w, e)
-		return
-	}
 	raw, e := readBody(w, r)
 	if e != nil {
 		fail(w, e)
@@ -154,6 +149,11 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	var req respRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		fail(w, apierr.New(apierr.BadRequest, "", "invalid JSON: "+err.Error()))
+		return
+	}
+	sess, e := s.session(req.Model)
+	if e != nil {
+		fail(w, e)
 		return
 	}
 	if req.PreviousResponseID != "" {
@@ -188,9 +188,6 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	ignoredHeader(w, ign)
 	model := req.Model
-	if model == "" {
-		model = sess.Role.String()
-	}
 	created := s.now().Unix()
 	var out []any
 	if len(rep.Calls) > 0 {

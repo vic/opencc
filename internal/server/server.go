@@ -26,6 +26,7 @@ type Server struct {
 	ReplyTo           string // wire address of opencc's socket
 	now               func() time.Time
 	store             respStore
+	Key               string // when set, every request must send it as the Bearer token
 }
 
 func New(sessDir, procRoot string, b *Bridge) *Server {
@@ -64,15 +65,14 @@ func newID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// session authenticates the key as a role and resolves it to one live session.
-func (s *Server) session(r *http.Request) (registry.Session, *apierr.Error) {
-	key, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || key == "" {
-		return registry.Session{}, apierr.New(apierr.NoAuth, "", "send the session name as Authorization: Bearer <role>")
+// session resolves the request's model to exactly one live Claude session.
+func (s *Server) session(model string) (registry.Session, *apierr.Error) {
+	if model == "" {
+		return registry.Session{}, apierr.New(apierr.BadRequest, "model", "model is required: name a live Claude session (see GET /v1/models)")
 	}
-	rl, err := role.Parse(key)
+	rl, err := role.Parse(model)
 	if err != nil {
-		return registry.Session{}, apierr.New(apierr.BadRequest, "Authorization", "role name: "+err.Error())
+		return registry.Session{}, apierr.New(apierr.BadRequest, "model", "model is not a session name: "+err.Error())
 	}
 	ss, err := registry.List(s.SessDir, s.ProcRoot)
 	if err != nil {
@@ -81,11 +81,15 @@ func (s *Server) session(r *http.Request) (registry.Session, *apierr.Error) {
 	hit, n := registry.Resolve(ss, rl)
 	switch n {
 	case 0:
-		return registry.Session{}, apierr.New(apierr.RoleNotFound, "", "no live session named "+rl.String())
+		var names []string
+		for _, x := range ss {
+			names = append(names, x.Role.String())
+		}
+		return registry.Session{}, apierr.New(apierr.RoleNotFound, "model", "no live session named "+rl.String()+"; live sessions: "+strings.Join(names, ", "))
 	case 1:
 		return hit, nil
 	}
-	return registry.Session{}, apierr.New(apierr.RoleAmbiguous, "", "more than one live session named "+rl.String())
+	return registry.Session{}, apierr.New(apierr.RoleAmbiguous, "model", "more than one live session named "+rl.String())
 }
 
 func readBody(w http.ResponseWriter, r *http.Request) ([]byte, *apierr.Error) {
@@ -103,11 +107,6 @@ func ignoredHeader(w http.ResponseWriter, keys []string) {
 }
 
 func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
-	sess, e := s.session(r)
-	if e != nil {
-		fail(w, e)
-		return
-	}
 	raw, e := readBody(w, r)
 	if e != nil {
 		fail(w, e)
@@ -121,6 +120,11 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	var req openai.ChatRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		fail(w, apierr.New(apierr.BadRequest, "", "invalid JSON: "+err.Error()))
+		return
+	}
+	sess, e := s.session(req.Model)
+	if e != nil {
+		fail(w, e)
 		return
 	}
 	id := newID()
@@ -141,9 +145,6 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	ignoredHeader(w, ign)
 	model := req.Model
-	if model == "" {
-		model = sess.Role.String()
-	}
 	created := s.now().Unix()
 	if req.Stream {
 		streamChat(w, "chatcmpl-"+id, model, created, rep)
@@ -194,11 +195,6 @@ func streamChat(w http.ResponseWriter, id, model string, created int64, rep mapp
 }
 
 func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
-	sess, e := s.session(r)
-	if e != nil {
-		fail(w, e)
-		return
-	}
 	raw, e := readBody(w, r)
 	if e != nil {
 		fail(w, e)
@@ -214,6 +210,11 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 		fail(w, apierr.New(apierr.BadRequest, "", "invalid JSON: "+err.Error()))
 		return
 	}
+	sess, e := s.session(req.Model)
+	if e != nil {
+		fail(w, e)
+		return
+	}
 	id := newID()
 	body, e := mapper.RenderPrompt(req.Prompt, s.ReplyTo, id)
 	if e != nil {
@@ -227,9 +228,6 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 	}
 	ignoredHeader(w, ign)
 	model := req.Model
-	if model == "" {
-		model = sess.Role.String()
-	}
 	fin := "stop"
 	resp := openai.CompletionResponse{ID: "cmpl-" + id, Object: "text_completion", Created: s.now().Unix(), Model: model,
 		Choices: []openai.CompletionChoice{{Text: txt, FinishReason: &fin}}}
@@ -243,10 +241,6 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) embeddings(w http.ResponseWriter, r *http.Request) {
-	if _, e := s.session(r); e != nil {
-		fail(w, e)
-		return
-	}
 	fail(w, apierr.New(apierr.NotImplemented, "", "embeddings have no backend: a Claude session cannot make vectors"))
 }
 

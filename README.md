@@ -28,30 +28,38 @@ $ ./opencc
 opencc: http://127.0.0.1:8080  socket /run/user/1000/cc-socks/ircc-opencc.sock
 ```
 
-There is no real API key. The key is the name of the session you want to talk to. Start a session with a name:
+The model is the session. Start a session with a name:
 
 ```console
 $ claude -n reviewer
 ```
 
-or rename a running one with `/rename reviewer`. Now `reviewer` is your API key. Any OpenAI client works with it:
+or rename a running one with `/rename reviewer`. Now `reviewer` is a model id. Ask for the list of models and you get the names of your live sessions, so tools with a model picker show the right choices. Any OpenAI client works:
 
 ```console
 $ export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
-$ export OPENAI_API_KEY=reviewer
+$ export OPENAI_API_KEY=anything
 ```
 
-Plain curl works too:
+Most clients insist on a key, so give them any text. opencc doesn't check it unless you set one (see below). Plain curl works too:
 
 ```console
 $ curl -s http://127.0.0.1:8080/v1/chat/completions \
-    -H "Authorization: Bearer reviewer" \
-    -d '{"model":"gpt-4o","messages":[{"role":"user","content":"What is 6 times 7?"}]}'
+    -d '{"model":"reviewer","messages":[{"role":"user","content":"What is 6 times 7?"}]}'
 ```
 
-The `model` field is echoed back and never used for routing. The key decides who answers. Ask for the list of models and you get the names of your live sessions, so tools with a model picker show the right choices.
+A model name that isn't a live session gets a `404` that lists the sessions that are.
 
-opencc only listens on your own machine (loopback) and refuses to start on any other address. Anything that can reach it can pick any of your sessions, so keep it local.
+### Letting other machines in
+
+By default opencc listens on your own machine only, and anyone who can reach it can talk to any of your sessions. That's fine on loopback. To listen on another address, set an API key. opencc then requires it on every request, and it refuses to start on a non-loopback address without one:
+
+```console
+$ export OPENCC_API_KEY=pick-something-long
+$ ./opencc --listen 0.0.0.0:8080
+```
+
+Clients send it the usual way, as the API key (`Authorization: Bearer ...`). The key never goes on the command line, and `--api-key-env` names a different variable if you prefer. Whoever has the key can use your sessions, so treat it like a password.
 
 ### What works
 
@@ -79,7 +87,8 @@ A session handles one request at a time. A second request to the same session wa
 $ ./opencc --help
 ```
 
-- `--listen` address to listen on, loopback only (default `127.0.0.1:8080`)
+- `--listen` address to listen on (default `127.0.0.1:8080`). Anything but loopback needs an API key.
+- `--api-key-env` the variable that holds the API key clients must send (default `OPENCC_API_KEY`). Empty or unset: no key is checked.
 - `--timeout` how long to wait for a session to answer (default `120s`)
 - `--sessions-dir` where Claude Code keeps its session list (default `~/.claude/sessions`)
 - `--socks-dir` where the session sockets live (default `$XDG_RUNTIME_DIR/cc-socks`)
@@ -89,8 +98,9 @@ $ ./opencc --help
 
 Errors come back in the OpenAI error format, so your client shows something useful.
 
-- `401`: no key. Send the session name as the key.
-- `404`: no live session has that name. Check `/v1/models`.
+- `400`: no `model`, or it is not a valid session name.
+- `401`: you set an API key and the request did not send it.
+- `404`: no live session has that name. The message lists the ones that are.
 - `409`: two live sessions share the name. Rename one.
 - `504`: the session didn't answer in time. It may be busy, or you can raise `--timeout`.
 
