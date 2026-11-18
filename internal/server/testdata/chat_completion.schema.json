@@ -1,0 +1,28 @@
+{
+  "$comment": "Subset of OpenAI CreateChatCompletionResponse (openapi components.schemas), transcribed by hand: required keys, types, enums. Not fetched from a pinned spec file.",
+  "type": "object",
+  "required": ["id", "object", "created", "model", "choices"],
+  "properties": {
+    "id": {"type": "string"},
+    "object": {"enum": ["chat.completion"]},
+    "created": {"type": "integer"},
+    "model": {"type": "string"},
+    "choices": {"type": "array", "minItems": 1, "items": {
+      "type": "object",
+      "required": ["finish_reason", "index", "message", "logprobs"],
+      "properties": {
+        "finish_reason": {"enum": ["stop", "length", "tool_calls", "content_filter", "function_call"]},
+        "index": {"type": "integer"},
+        "logprobs": {"type": ["object", "null"]},
+        "message": {"type": "object", "required": ["role", "content", "refusal"], "properties": {
+          "role": {"enum": ["assistant"]},
+          "content": {"type": ["string", "null"]},
+          "refusal": {"type": ["string", "null"]},
+          "tool_calls": {"type": "array", "items": {"type": "object", "required": ["id", "type", "function"], "properties": {
+            "id": {"type": "string"}, "type": {"enum": ["function"]},
+            "function": {"type": "object", "required": ["name", "arguments"], "properties": {"name": {"type": "string"}, "arguments": {"type": "string"}}}}}}
+        }}
+      }
+    }}
+  }
+}
