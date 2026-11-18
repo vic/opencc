@@ -1,3 +1,4 @@
 .envrc
-opencc
+/opencc
 .direnv
+/result
