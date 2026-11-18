@@ -25,6 +25,9 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "client" {
+		return runClient(os.Args[2:])
+	}
 	home, _ := os.UserHomeDir()
 	rt := os.Getenv("XDG_RUNTIME_DIR")
 	listen := flag.String("listen", "127.0.0.1:8080", "loopback address")
